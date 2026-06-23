@@ -43,8 +43,9 @@ class State(TypedDict):
     context: str
     answer : str
 
-    issup:Literal["Fully Supported ","Partially Supported", "No support"]
+    is_sup:Literal["Fully Supported ","Partially Supported", "No support"]
     evidence:List[str]
+    retries : int
 
 class RetrieveDecision(BaseModel):
     should_retrieve : bool =Field(... , description = "True if external documents are needed to answer reliably , else False ")
@@ -161,12 +162,12 @@ def no_answer_found(state:State):
     return {"answer" : "No answer found " , "context":""}
 
 
-class isSupDecision(BaseModel):
+class is_SupDecision(BaseModel):
     issup:Literal["Fully_Supported" , "partially_supported" , "no_support"]
     evidence:List[str]=Field(default_factory=list)
 
 
-issup_prompt = ChatPromptTemplate.from_messages([(
+is_sup_prompt = ChatPromptTemplate.from_messages([(
             "system",
             "You are verifying whether the ANSWER is supported by the CONTEXT.\n"
             "Return JSON with keys: issup, evidence.\n"
@@ -195,16 +196,62 @@ issup_prompt = ChatPromptTemplate.from_messages([(
             "Context:\n{context}\n"
         )])
 
-issup_llm = llm.with_structured_output(isSupDecision)
+is_sup_llm = llm.with_structured_output(is_SupDecision)
 
 def is_sup(state:State):
-    decision : isSupDecision = issup_llm.invoke(issup_prompt.format_messages(
+    decision : is_SupDecision = is_sup_llm.invoke(is_sup_prompt.format_messages(
         question=state["question"],
         answer=state.get("answer",""),
         context=state.get("context","")
     ))
 
     return {"issup":decision.issup , "evidence":decision.evidence}
+
+MAX_RETRIES = 10
+
+def route_after_is_sup(state:State)->Literal["accept_answer","revise_answer"]:
+    if state.get("is_sup")=="Fully Supported":
+        return "accept_answer"
+    
+    if state.get("retries", 0) >=MAX_RETRIES:
+        return "accept_answer"
+    
+    return "revise_answer"
+
+def accept_answer(state:State):
+    return{}
+
+revise_prompt = ChatPromptTemplate.from_messages([(
+            "system",
+            "You are a STRICT reviser.\n\n"
+            "You must output based on the following format:\n\n"
+            "FORMAT (quote-only answer):\n"
+            "- <direct quote from the CONTEXT>\n"
+            "- <direct quote from the CONTEXT>\n\n"
+            "Rules:\n"
+            "- Use ONLY the CONTEXT.\n"
+            "- Do NOT add any new words besides bullet dashes and the quotes themselves.\n"
+            "- Do NOT explain anything.\n"
+            "- Do NOT say 'context', 'not mentioned', 'does not mention', 'not provided', etc.\n"
+        ),(
+            "human",
+            "Question:\n{question}\n\n"
+            "Current Answer:\n{answer}\n\n"
+            "CONTEXT:\n{context}"
+        )])
+
+def revise_answer(state:State):
+    out=llm.invoke(revise_prompt.format_messages(
+        question=state["question"],
+        answer=state.get("answer",""),
+        context= state.get("context","")
+    ))
+
+    return {"answer":out.content,
+            "retries": state.get("retries" , 0) +1}
+
+
+
 
 
 
@@ -218,6 +265,12 @@ g.add_node("is_relevant",is_relevant)
 g.add_node("generate_from_context", generate_from_context)
 g.add_node("no_answer_found", no_answer_found) 
 g.add_node("is_sup",is_sup)
+g.add_node("accept_answer",accept_answer)
+g.add_node("revise_answer",revise_answer)
+
+
+
+
 
 g.add_edge(START , "decide_retrieval")
 g.add_conditional_edges("decide_retrieval", route_after_decide,{"generate_direct":"generate_direct", "retrieve":'retrieve'})
@@ -226,7 +279,9 @@ g.add_edge("retrieve", "is_relevant")
 g.add_conditional_edges("is_relevant",route_after_relevance,{"generate_from_context":"generate_from_context" , "no_answer_found":"no_answer_found"})
 g.add_edge("no_answer_found",END)
 g.add_edge("generate_from_context","is_sup")
-g.add_edge("is_sup",END)
+g.add_conditional_edges("is_sup",route_after_is_sup,{"accept_answer":"accept_answer","revise_answer":"revise_answer"})
+g.add_edge("revise_answer","is_sup")
+g.add_edge("accept_answer",END)
 
 srag=g.compile()
 
