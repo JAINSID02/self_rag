@@ -33,7 +33,7 @@ vector_store =FAISS.from_documents(chunks,embeddings)
 
 retriever = vector_store.as_retriever(search_kwargs={"k":4})
 
-llm =ChatOllama(model = "qwen2.5:3b")
+llm =ChatOllama(model = "deepseek-r1:8b")
 
 class State(TypedDict):
     question : str
@@ -47,7 +47,7 @@ class State(TypedDict):
     context: str
     answer : str
 
-    is_sup:Literal["Fully Supported ","Partially Supported", "No support"]
+    is_sup:Literal["Fully_Supported","Partially_Supported", "no_support"]
     evidence:List[str]
     retries : int
 
@@ -101,8 +101,9 @@ def generate_direct(state: State):
 
     return {"answer" : out.content}
 
-def retrieve(state : State):
-    return {"docs": retriever.invoke(state["question"])}
+def retrieve(state: State):
+    q = state.get("retrieval_query") or state["question"]
+    return {"docs": retriever.invoke(q)}
 
 
 
@@ -170,17 +171,17 @@ def no_answer_found(state:State):
 
 
 class is_SupDecision(BaseModel):
-    issup:Literal["Fully_Supported" , "partially_supported" , "no_support"]
+    is_sup:Literal["Fully_Supported","Partially_Supported", "no_support"]
     evidence:List[str]=Field(default_factory=list)
 
 
 is_sup_prompt = ChatPromptTemplate.from_messages([(
             "system",
             "You are verifying whether the ANSWER is supported by the CONTEXT.\n"
-            "Return JSON with keys: issup, evidence.\n"
-            "issup must be one of: fully_supported, partially_supported, no_support.\n\n"
-            "How to decide issup:\n"
-            "- fully_supported:\n"
+            "Return JSON with keys: is_sup, evidence.\n"
+            "is_sup must be one of: Fully_Supported,Partially_Supported, no_support.\n\n"
+            "How to decide is_sup:\n"
+            "- Fully_Supported:\n"
             "  Every meaningful claim is explicitly supported by CONTEXT, and the ANSWER does NOT introduce\n"
             "  any qualitative/interpretive words that are not present in CONTEXT.\n"
             "  (Examples of disallowed words unless present in CONTEXT: culture, generous, robust, designed to,\n"
@@ -212,12 +213,12 @@ def is_sup(state:State):
         context=state.get("context","")
     ))
 
-    return {"issup":decision.issup , "evidence":decision.evidence}
+    return {"is_sup":decision.is_sup , "evidence":decision.evidence}
 
 MAX_RETRIES = 10
 
 def route_after_is_sup(state:State)->Literal["accept_answer","revise_answer"]:
-    if state.get("is_sup")=="Fully Supported":
+    if state.get("is_sup")=="Fully_Supported":
         return "accept_answer"
     
     if state.get("retries", 0) >=MAX_RETRIES:
@@ -273,7 +274,7 @@ is_use_prompt=ChatPromptTemplate.from_messages([(
             "- useful: The answer directly answers the question or provides the requested specific info.\n"
             "- not_useful: The answer is generic, off-topic, or only gives related background without answering.\n"
             "- Do NOT use outside knowledge.\n"
-            "- Do NOT re-check grounding (IsSUP already did that). Only check: 'Did we answer the question?'\n"
+            "- Do NOT re-check grounding (Is_SUP already did that). Only check: 'Did we answer the question?'\n"
             "- Keep reason to 1 short line."
         ),(
             "human",
@@ -378,13 +379,22 @@ g.add_edge("rewrite_question","retrieve")
 
 srag=g.compile()
 
-result=srag.invoke(
+user_input=str(input("Hello User Pls Enter your query  :  "  ))
+
+while user_input:
+
+  result=srag.invoke(
     {
-        "question": "What is the name of the book used",
-        "need_retrieval": False,
+        "question": user_input,
+        "need_retrieval": False ,
         "docs": [],
         "answer": "",
+        "retrieval_query": ""
+        
     }
-)
+  )
 
-print(result["answer"])
+  print(result["answer"])
+
+  user_input=str(input("Tell me your next query  :   " ))
+
