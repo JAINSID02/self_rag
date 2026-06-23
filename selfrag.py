@@ -54,10 +54,10 @@ decide_retrieval_prompt=ChatPromptTemplate.from_messages([("system",
             "- If unsure, choose True."
         ),("human","Question : {question}")])
 
-shoukd_retrieve_llm = llm.with_structured_output(RetrieveDecision)
+should_retrieve_llm = llm.with_structured_output(RetrieveDecision)
 
 def decide_retrieval(state: State):
-    decision = shoukd_retrieve_llm.invoke(
+    decision = should_retrieve_llm.invoke(
         decide_retrieval_prompt.format_messages(
             question=state["question"]
         )
