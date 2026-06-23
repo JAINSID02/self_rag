@@ -37,6 +37,10 @@ llm =ChatOllama(model = "qwen2.5:3b")
 
 class State(TypedDict):
     question : str
+
+
+    retrieval_query: str
+    rewrite_tries:int
     need_retrieval:bool
     docs:List[Document]
     relevant_docs : List[Document]
@@ -286,10 +290,56 @@ def is_use(state:State):
 
     return {"is_use":decision.is_use , "use_reason":decision.reason}
 
-def route_after_is_use(state:State)->Literal["END","no_answer_found"]:
+MAX_REWRITE_TRIES = 3
+
+def route_after_is_use(state:State)->Literal["END","rewrite_question","no_answer_found"]:
     if state.get("is_use")=="useful":
         return "END"
-    return "no_answer_found"
+    
+    if state.get("rewrite_tries",0) > MAX_REWRITE_TRIES:
+        return "no_answer_found"
+
+    return "rewrite_question"
+
+class rewrite_decision(BaseModel):
+    retrieval_query:str =Field(... , description="Rewritten query optimized for vector retrieval against internal company PDF")
+
+rewrite_for_retrieval_prompt=ChatPromptTemplate.from_messages([(
+            "system",
+            "Rewrite the user's QUESTION into a query optimized for vector retrieval over INTERNAL company PDFs.\n\n"
+            "Rules:\n"
+            "- Keep it short (6–16 words).\n"
+            "- Preserve key entities (e.g., NexaAI, plan names).\n"
+            "- Add 2–5 high-signal keywords that likely appear in policy/pricing docs.\n"
+            "- Remove filler words.\n"
+            "- Do NOT answer the question.\n"
+            "- Output JSON with key: retrieval_query\n\n"
+            "Examples:\n"
+            "Q: 'Do NexaAI plans include a free trial?'\n"
+            "-> {{'retrieval_query': 'NexaAI free trial duration trial period plans'}}\n\n"
+            "Q: 'What is NexaAI refund policy?'\n"
+            "-> {{'retrieval_query': 'NexaAI refund policy cancellation refund timeline charges'}}"
+        ),(
+            "human",
+            "QUESTION:\n{question}\n\n"
+            "Previous retrieval query:\n{retrieval_query}\n\n"
+            "Answer (if any):\n{answer}"
+        )])
+
+rewrite_llm = llm.with_structured_output(rewrite_decision)
+
+def rewrite_question(state:State):
+    decision:rewrite_decision=rewrite_llm.invoke(rewrite_for_retrieval_prompt.format_messages(question=state["question"],
+    retrieval_query=state.get("retrieval_query",""),
+    answer=state.get("answer","")))
+
+    return {
+        "retrieval_query":decision.retrieval_query,
+        "rewrite_tries":state.get("rewrite_tries",0) +1 ,
+        "docs":[],
+        "relevant_docs":[],
+        "context":""
+    }
 
 
 
@@ -308,6 +358,7 @@ g.add_node("no_answer_found", no_answer_found)
 g.add_node("is_sup",is_sup)
 g.add_node("revise_answer",revise_answer)
 g.add_node("is_use",is_use)
+g.add_node("rewrite_question",rewrite_question)
 
 
 
@@ -322,7 +373,8 @@ g.add_edge("no_answer_found",END)
 g.add_edge("generate_from_context","is_sup")
 g.add_conditional_edges("is_sup",route_after_is_sup,{"accept_answer":"is_use","revise_answer":"revise_answer"})
 g.add_edge("revise_answer","is_sup")
-g.add_conditional_edges("is_use",route_after_is_use,{"END":END,"no_answer_found":"no_answer_found"})
+g.add_conditional_edges("is_use",route_after_is_use,{"END":END,   "rewrite_question": "rewrite_question" , "no_answer_found":"no_answer_found"})
+g.add_edge("rewrite_question","retrieve")
 
 srag=g.compile()
 
