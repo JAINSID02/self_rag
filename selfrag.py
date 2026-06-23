@@ -47,6 +47,9 @@ class State(TypedDict):
     evidence:List[str]
     retries : int
 
+    is_use :Literal["useful","not_useful"]
+    use_reason:str
+
 class RetrieveDecision(BaseModel):
     should_retrieve : bool =Field(... , description = "True if external documents are needed to answer reliably , else False ")
 
@@ -251,6 +254,44 @@ def revise_answer(state:State):
             "retries": state.get("retries" , 0) +1}
 
 
+class is_use_decision(BaseModel):
+    is_use:Literal["useful","not_useful"]
+    reason:str=Field(... , description = "short answer in one line")
+
+is_use_prompt=ChatPromptTemplate.from_messages([(
+            "system",
+            "You are judging USEFULNESS of the ANSWER for the QUESTION.\n\n"
+            "Goal:\n"
+            "- Decide if the answer actually addresses what the user asked.\n\n"
+            "Return JSON with keys: isuse, reason.\n"
+            "isuse must be one of: useful, not_useful.\n\n"
+            "Rules:\n"
+            "- useful: The answer directly answers the question or provides the requested specific info.\n"
+            "- not_useful: The answer is generic, off-topic, or only gives related background without answering.\n"
+            "- Do NOT use outside knowledge.\n"
+            "- Do NOT re-check grounding (IsSUP already did that). Only check: 'Did we answer the question?'\n"
+            "- Keep reason to 1 short line."
+        ),(
+            "human",
+            "Question:\n{question}\n\nAnswer:\n{answer}"
+        )])
+
+is_use_llm=llm.with_structured_output(is_use_decision)
+
+def is_use(state:State):
+    decision:is_use_decision=is_use_llm.invoke(is_use_prompt.format_messages(
+        question = state["question"],
+        answer=state.get("answer","")
+    ))
+
+    return {"is_use":decision.is_use , "use_reason":decision.reason}
+
+def route_after_is_use(state:State)->Literal["END","no_answer_found"]:
+    if state.get("is_use")=="useful":
+        return "END"
+    return "no_answer_found"
+
+
 
 
 
@@ -265,8 +306,8 @@ g.add_node("is_relevant",is_relevant)
 g.add_node("generate_from_context", generate_from_context)
 g.add_node("no_answer_found", no_answer_found) 
 g.add_node("is_sup",is_sup)
-g.add_node("accept_answer",accept_answer)
 g.add_node("revise_answer",revise_answer)
+g.add_node("is_use",is_use)
 
 
 
@@ -279,9 +320,9 @@ g.add_edge("retrieve", "is_relevant")
 g.add_conditional_edges("is_relevant",route_after_relevance,{"generate_from_context":"generate_from_context" , "no_answer_found":"no_answer_found"})
 g.add_edge("no_answer_found",END)
 g.add_edge("generate_from_context","is_sup")
-g.add_conditional_edges("is_sup",route_after_is_sup,{"accept_answer":"accept_answer","revise_answer":"revise_answer"})
+g.add_conditional_edges("is_sup",route_after_is_sup,{"accept_answer":"is_use","revise_answer":"revise_answer"})
 g.add_edge("revise_answer","is_sup")
-g.add_edge("accept_answer",END)
+g.add_conditional_edges("is_use",route_after_is_use,{"END":END,"no_answer_found":"no_answer_found"})
 
 srag=g.compile()
 
