@@ -38,7 +38,8 @@ llm =ChatOllama(model = "qwen2.5:3b")
 class State(TypedDict):
     question : str
     need_retrieval:bool
-    docs=List[Document]
+    docs:List[Document]
+    relevant_docs : List[Document]
     answer : str
 
 class RetrieveDecision(BaseModel):
@@ -68,6 +69,8 @@ def decide_retrieval(state: State):
     return {
         "need_retrieval": decision.should_retrieve
     }
+
+
 direct_generation_prompt=ChatPromptTemplate.from_messages([(
             "system",
             "Answer the question using only your general knowledge.\n"
@@ -84,6 +87,35 @@ def generate_direct(state: State):
 def retrieve(state : State):
     return {"docs": retriever.invoke(state["question"])}
 
+
+
+
+class RelevanceDecision(BaseModel):
+    is_relevant : bool =Field(... , description = "True , if the documents help answer the question , else fasle" )
+
+
+is_relevant_prompt =ChatPromptTemplate.from_messages([("system",
+            "You are judging document relevance.\n"
+            "Return JSON that matches this schema:\n"
+            "{{'is_relevant': boolean}}\n\n"
+            "A document is relevant if it contains information useful for answering the question."),
+            ("human",
+            "Question:\n{question}\n\nDocument:\n{document}")])
+
+
+relevance_llm = llm.with_structured_output(RelevanceDecision)
+
+
+def is_relevant(state:State):
+    relevant_docs : List[Document] = []
+
+    for doc in state["docs"]:
+        decision : RelevanceDecision = relevance_llm.invoke(is_relevant_prompt.format_messages(question=state["question"],document=doc.page_content))
+        if decision.is_relevant:
+            relevant_docs.append(doc)
+    return {"relevant_docs":relevant_docs}
+
+
 def route_after_decide(state:State)->Literal["generate_direct" , "retrieve"]:
     if state["need_retrieval"]:
         return "retrieve"
@@ -95,17 +127,19 @@ g=StateGraph(State)
 g.add_node("decide_retrieval", decide_retrieval)
 g.add_node("generate_direct", generate_direct)
 g.add_node("retrieve", retrieve)
+g.add_node("is_relevant",is_relevant)
 
 g.add_edge(START , "decide_retrieval")
 g.add_conditional_edges("decide_retrieval", route_after_decide,{"generate_direct":"generate_direct", "retrieve":'retrieve'})
 g.add_edge("generate_direct", END)
-g.add_edge("retrieve", END)
+g.add_edge("retrieve", "is_relevant")
+g.add_edge("is_relevant", END )
 
 srag=g.compile()
 
 result=srag.invoke(
     {
-        "question": "What is Machine Learning",
+        "question": "What is the name of the book used",
         "need_retrieval": False,
         "docs": [],
         "answer": "",
