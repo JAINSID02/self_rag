@@ -40,6 +40,7 @@ class State(TypedDict):
     need_retrieval:bool
     docs:List[Document]
     relevant_docs : List[Document]
+    context: str
     answer : str
 
 class RetrieveDecision(BaseModel):
@@ -115,6 +116,35 @@ def is_relevant(state:State):
             relevant_docs.append(doc)
     return {"relevant_docs":relevant_docs}
 
+rag_generation_prompt = ChatPromptTemplate.from_messages([(
+            "system",
+            "You are a business RAG assistant.\n"
+            "Answer the user's question using ONLY the provided context.\n"
+            "If the context does not contain enough information, say:\n"
+            "'No relevant document found.'\n"
+            "Do not use outside knowledge.\n"
+        ),
+        (
+            "human",
+            "Question:\n{question}\n\n"
+            "Context:\n{context}\n"
+        )])
+
+def generate_from_context(state:State):
+
+    context = "\n\n---\n\n".join([d.page_content for d in state.get("relevant_docs",[])]).strip()
+
+    if not context:
+        return {"answer": "No relevant document found.", "context": ""}
+    
+    out = llm.invoke(rag_generation_prompt.format_messages(question=state["question"],context=context))
+
+    return {"answer": out.content , "context": context}
+
+def no_relevant_docs(state:State):
+    return {"answer" : "No relevant document found " , "context":""}
+
+
 
 def route_after_decide(state:State)->Literal["generate_direct" , "retrieve"]:
     if state["need_retrieval"]:
@@ -122,18 +152,31 @@ def route_after_decide(state:State)->Literal["generate_direct" , "retrieve"]:
     
     return "generate_direct"
 
+
+def route_after_relevance(state:State)->Literal["generate_from_context","no_relevant_docs"]:
+    if state.get("relevant_docs")   and len(state["relevant_docs"]) > 0     : 
+        return "generate_from_context"
+    else :
+        return "no_relevant_docs"
+
+
 g=StateGraph(State)
 
 g.add_node("decide_retrieval", decide_retrieval)
 g.add_node("generate_direct", generate_direct)
 g.add_node("retrieve", retrieve)
 g.add_node("is_relevant",is_relevant)
+g.add_node("generate_from_context", generate_from_context)
+g.add_node("no_relevant_docs", no_relevant_docs) 
 
 g.add_edge(START , "decide_retrieval")
 g.add_conditional_edges("decide_retrieval", route_after_decide,{"generate_direct":"generate_direct", "retrieve":'retrieve'})
 g.add_edge("generate_direct", END)
 g.add_edge("retrieve", "is_relevant")
-g.add_edge("is_relevant", END )
+g.add_conditional_edges("is_relevant",route_after_relevance,{"generate_from_context":"generate_from_context" , "no_relevant_docs":"no_relevant_docs"})
+
+g.add_edge("generate_from_context", END )
+g.add_edge("no_relevant_docs",END)
 
 srag=g.compile()
 
